@@ -43,6 +43,7 @@ export function UpdateChecker() {
 
 	useEffect(() => {
 		checkSettingsAndUpdate();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
 	const checkSettingsAndUpdate = async () => {

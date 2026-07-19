@@ -1,14 +1,9 @@
 import {
-	Copy,
 	Database,
-	DotsThreeVertical,
-	Export,
+	Cube,
 	Gear,
 	GithubLogo,
-	Lock,
-	PencilSimple,
 	Plus,
-	Trash,
 	UploadSimple,
 } from "@phosphor-icons/react";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -18,85 +13,22 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { ConnectionForm } from "@/components/ConnectionForm";
+import { ConnectionCard } from "@/components/connections/ConnectionCard";
+import { DeleteConnectionDialog } from "@/components/connections/DeleteConnectionDialog";
+import { ConnectDockerDialog } from "@/components/docker/ConnectDockerDialog";
+import { CreateDatabaseDialog } from "@/components/docker/CreateDatabaseDialog";
 import { EmptyState } from "@/components/EmptyState";
-import { ClickhouseIcon } from "@/components/icons/clickhouse";
-
-import { PostgresqlIcon } from "@/components/icons/postgres";
-import { RedisIcon } from "@/components/icons/redis";
-import { SqliteIcon } from "@/components/icons/sqlite";
 import { UpdateChecker } from "@/components/UpdateChecker";
-import {
-	AlertDialog,
-	AlertDialogAction,
-	AlertDialogCancel,
-	AlertDialogContent,
-	AlertDialogDescription,
-	AlertDialogFooter,
-	AlertDialogHeader,
-	AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-	ContextMenu,
-	ContextMenuContent,
-	ContextMenuItem,
-	ContextMenuTrigger,
-} from "@/components/ui/context-menu";
-import {
-	DropdownMenu,
-	DropdownMenuContent,
-	DropdownMenuItem,
-	DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
 import {
 	api,
 	type Connection,
 	type ConnectionFormData,
 	type ConnectionsExport,
+	type DockerConnectionState,
 } from "@/lib/tauri";
-
-const getDbTypeConfig = (type: string) => {
-	switch (type) {
-		case "postgres":
-			return {
-				icon: PostgresqlIcon,
-				iconClass: "bg-blue-500/10 text-blue-600 dark:text-blue-400",
-				accentClass: "bg-blue-500",
-			};
-		case "mysql":
-			return {
-				icon: Database,
-				iconClass: "bg-orange-500/10 text-orange-600 dark:text-orange-400",
-				accentClass: "bg-orange-500",
-			};
-		case "sqlite":
-			return {
-				icon: SqliteIcon,
-				iconClass: "bg-cyan-500/10 text-cyan-700 dark:text-cyan-400",
-				accentClass: "bg-cyan-500",
-			};
-		case "redis":
-			return {
-				icon: RedisIcon,
-				iconClass: "bg-red-500/10 text-red-600 dark:text-red-400",
-				accentClass: "bg-red-500",
-			};
-		case "clickhouse":
-			return {
-				icon: ClickhouseIcon,
-				iconClass: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
-				accentClass: "bg-yellow-500",
-			};
-		default:
-			return {
-				icon: Database,
-				iconClass: "bg-primary/10 text-primary",
-				accentClass: "bg-primary",
-			};
-	}
-};
 
 export function Connections() {
 	const navigate = useNavigate();
@@ -109,11 +41,25 @@ export function Connections() {
 	const [deletingConnection, setDeletingConnection] =
 		useState<Connection | null>(null);
 	const [isDeleting, setIsDeleting] = useState(false);
+	const [createDatabaseOpen, setCreateDatabaseOpen] = useState(false);
+	const [connectDockerOpen, setConnectDockerOpen] = useState(false);
+	const [deleteDockerData, setDeleteDockerData] = useState(false);
+	const [dockerStates, setDockerStates] = useState<
+		Record<string, DockerConnectionState>
+	>({});
 
 	const fetchConnections = async () => {
 		try {
-			const data = await api.connections.list();
+			const [data, states] = await Promise.all([
+				api.connections.list(),
+				api.docker.states(),
+			]);
 			setConnections(data);
+			setDockerStates(
+				Object.fromEntries(
+					states.map((state) => [state.connection_uuid, state]),
+				),
+			);
 		} catch (error) {
 			console.error("Failed to fetch connections:", error);
 		} finally {
@@ -158,6 +104,7 @@ export function Connections() {
 	};
 
 	const handleDeleteClick = (connection: Connection) => {
+		setDeleteDockerData(false);
 		setDeletingConnection(connection);
 	};
 
@@ -166,18 +113,56 @@ export function Connections() {
 
 		setIsDeleting(true);
 		try {
-			await api.connections.delete(deletingConnection.id);
+			const result = await api.connections.delete(
+				deletingConnection.id,
+				deleteDockerData,
+			);
 			await fetchConnections();
 			setDeletingConnection(null);
+			if (result.docker_cleanup_warning) {
+				toast.warning(
+					`Connection deleted, but Docker cleanup failed: ${result.docker_cleanup_warning}`,
+				);
+			}
 		} catch (error) {
 			console.error("Failed to delete connection:", error);
+			toast.error(String(error));
 		} finally {
 			setIsDeleting(false);
 		}
 	};
 
 	const handleCancelDelete = () => {
+		setDeleteDockerData(false);
 		setDeletingConnection(null);
+	};
+
+	const handleCopyConnectionString = async (connection: Connection) => {
+		try {
+			const value = await api.docker.connectionString(connection.uuid);
+			await navigator.clipboard.writeText(value);
+			toast.success("Connection string copied");
+		} catch (error) {
+			toast.error(String(error));
+		}
+	};
+
+	const handleDockerAction = async (
+		connection: Connection,
+		action: "start" | "stop" | "restart",
+	) => {
+		try {
+			await api.docker.control(connection.uuid, action);
+			await fetchConnections();
+			const labels = {
+				start: "Started",
+				stop: "Stopped",
+				restart: "Restarted",
+			};
+			toast.success(`${labels[action]} container`);
+		} catch (error) {
+			toast.error(String(error));
+		}
 	};
 
 	const handleDuplicateConnection = async (connection: Connection) => {
@@ -334,13 +319,18 @@ export function Connections() {
 								description="Create a local workspace for PostgreSQL, SQLite, Redis, or ClickHouse. Credentials stay on this Mac."
 								actions={[
 									{
-										label: "Import Connections",
-										onClick: handleImportConnections,
+										label: "Create database",
+										onClick: () => setCreateDatabaseOpen(true),
+									},
+									{
+										label: "Connect Docker",
+										onClick: () => setConnectDockerOpen(true),
 										variant: "outline",
 									},
 									{
-										label: "Create Connection",
+										label: "New connection",
 										onClick: () => setIsFormOpen(true),
+										variant: "outline",
 									},
 								]}
 							/>
@@ -359,6 +349,18 @@ export function Connections() {
 								</div>
 								<div className="flex items-center gap-2">
 									<Button
+										onClick={() => setConnectDockerOpen(true)}
+										size="sm"
+										variant="outline"
+									>
+										<Cube className="size-4" />
+										Connect Docker
+									</Button>
+									<Button onClick={() => setCreateDatabaseOpen(true)} size="sm">
+										<Plus className="size-4" weight="bold" />
+										Create database
+									</Button>
+									<Button
 										onClick={handleImportConnections}
 										size="sm"
 										variant="outline"
@@ -366,7 +368,11 @@ export function Connections() {
 										<UploadSimple className="size-4" />
 										Import
 									</Button>
-									<Button onClick={() => setIsFormOpen(true)} size="sm">
+									<Button
+										onClick={() => setIsFormOpen(true)}
+										size="sm"
+										variant="outline"
+									>
 										<Plus className="size-4" weight="bold" />
 										New connection
 									</Button>
@@ -374,151 +380,24 @@ export function Connections() {
 							</div>
 
 							<div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
-								{connections.map((connection) => {
-									const dbConfig = getDbTypeConfig(
-										connection.type || "postgres",
-									);
-									const DbIcon = dbConfig.icon;
-
-									return (
-										<ContextMenu key={connection.id}>
-											<ContextMenuTrigger>
-												<div className="group workspace-panel relative overflow-hidden rounded-lg border p-3.5 shadow-sm transition-[border-color,box-shadow,transform] duration-150 hover:-translate-y-px hover:border-foreground/20 hover:shadow-md focus-within:ring-2 focus-within:ring-ring/40">
-													<button
-														type="button"
-														onClick={() =>
-															navigate(`/connections/${connection.uuid}`)
-														}
-														onMouseDown={(e) => {
-															if (e.button === 1) {
-																e.preventDefault();
-																navigate(`/connections/${connection.uuid}`);
-															}
-														}}
-														aria-label={`Open ${connection.name}`}
-														className="absolute inset-0 cursor-pointer rounded-lg outline-none"
-													/>
-													<div
-														className={`absolute inset-y-3 left-0 w-0.5 rounded-r-full opacity-70 ${dbConfig.accentClass}`}
-													/>
-
-													<div className="pointer-events-none relative flex items-center gap-3 pl-1">
-														<div
-															className={`flex size-9 shrink-0 items-center justify-center rounded-md ${dbConfig.iconClass}`}
-														>
-															<DbIcon className="size-4" />
-														</div>
-
-														<div className="min-w-0 flex-1">
-															<div className="flex items-center gap-2">
-																<h3 className="truncate text-sm font-medium">
-																	{connection.name}
-																</h3>
-																<Badge
-																	variant="secondary"
-																	className="h-5 shrink-0 px-1.5 py-0 text-[10px] capitalize"
-																>
-																	{connection.type || "postgres"}
-																</Badge>
-																{connection.ssl === 1 && (
-																	<Lock
-																		className="size-3 shrink-0 text-muted-foreground"
-																		weight="fill"
-																	/>
-																)}
-															</div>
-															<p className="mt-0.5 truncate text-xs text-muted-foreground">
-																{connection.type === "sqlite"
-																	? connection.file_path?.split("/").pop() ||
-																		"Local file"
-																	: `${connection.host}:${connection.port}${connection.database ? ` • ${connection.database}` : ""}`}
-															</p>
-														</div>
-
-														<DropdownMenu>
-															<DropdownMenuTrigger
-																onClick={(e) => e.stopPropagation()}
-																className="pointer-events-auto shrink-0 rounded-md p-1.5 text-muted-foreground opacity-0 transition-colors hover:bg-muted hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100"
-																aria-label={`Actions for ${connection.name}`}
-															>
-																<DotsThreeVertical
-																	className="size-4"
-																	weight="bold"
-																/>
-															</DropdownMenuTrigger>
-															<DropdownMenuContent align="end" side="bottom">
-																<DropdownMenuItem
-																	onClick={(e) => {
-																		e.stopPropagation();
-																		handleEditConnection(connection);
-																	}}
-																>
-																	<PencilSimple className="w-4 h-4" />
-																	Edit
-																</DropdownMenuItem>
-																<DropdownMenuItem
-																	onClick={(e) => {
-																		e.stopPropagation();
-																		handleDuplicateConnection(connection);
-																	}}
-																>
-																	<Copy className="w-4 h-4" />
-																	Duplicate
-																</DropdownMenuItem>
-																<DropdownMenuItem
-																	onClick={(e) => {
-																		e.stopPropagation();
-																		handleExportConnection(connection);
-																	}}
-																>
-																	<Export className="w-4 h-4" />
-																	Export
-																</DropdownMenuItem>
-																<DropdownMenuItem
-																	variant="destructive"
-																	onClick={(e) => {
-																		e.stopPropagation();
-																		handleDeleteClick(connection);
-																	}}
-																>
-																	<Trash className="w-4 h-4" />
-																	Delete
-																</DropdownMenuItem>
-															</DropdownMenuContent>
-														</DropdownMenu>
-													</div>
-												</div>
-											</ContextMenuTrigger>
-											<ContextMenuContent>
-												<ContextMenuItem
-													onClick={() => handleEditConnection(connection)}
-												>
-													<PencilSimple className="w-4 h-4" />
-													Edit
-												</ContextMenuItem>
-												<ContextMenuItem
-													onClick={() => handleDuplicateConnection(connection)}
-												>
-													<Copy className="w-4 h-4" />
-													Duplicate
-												</ContextMenuItem>
-												<ContextMenuItem
-													onClick={() => handleExportConnection(connection)}
-												>
-													<Export className="w-4 h-4" />
-													Export
-												</ContextMenuItem>
-												<ContextMenuItem
-													variant="destructive"
-													onClick={() => handleDeleteClick(connection)}
-												>
-													<Trash className="w-4 h-4" />
-													Delete
-												</ContextMenuItem>
-											</ContextMenuContent>
-										</ContextMenu>
-									);
-								})}
+								{connections.map((connection) => (
+									<ConnectionCard
+										key={connection.id}
+										connection={connection}
+										dockerState={dockerStates[connection.uuid]}
+										onOpen={() => navigate(`/connections/${connection.uuid}`)}
+										onCopyConnectionString={() =>
+											handleCopyConnectionString(connection)
+										}
+										onDockerAction={(action) =>
+											handleDockerAction(connection, action)
+										}
+										onEdit={() => handleEditConnection(connection)}
+										onDuplicate={() => handleDuplicateConnection(connection)}
+										onExport={() => handleExportConnection(connection)}
+										onDelete={() => handleDeleteClick(connection)}
+									/>
+								))}
 							</div>
 						</div>
 					)}
@@ -532,34 +411,30 @@ export function Connections() {
 					onCancel={handleCloseForm}
 					initialData={editingConnection}
 				/>
+				<CreateDatabaseDialog
+					open={createDatabaseOpen}
+					onOpenChange={setCreateDatabaseOpen}
+					onCreated={async () => fetchConnections()}
+				/>
+				<ConnectDockerDialog
+					open={connectDockerOpen}
+					onOpenChange={setConnectDockerOpen}
+					onLinked={async () => fetchConnections()}
+				/>
 
-				<AlertDialog
-					open={!!deletingConnection}
-					onOpenChange={(open) => !open && handleCancelDelete()}
-				>
-					<AlertDialogContent>
-						<AlertDialogHeader>
-							<AlertDialogTitle>Delete Connection</AlertDialogTitle>
-							<AlertDialogDescription>
-								Are you sure you want to delete "{deletingConnection?.name}"?
-								This action cannot be undone.
-							</AlertDialogDescription>
-						</AlertDialogHeader>
-						<AlertDialogFooter>
-							<AlertDialogCancel disabled={isDeleting}>
-								Cancel
-							</AlertDialogCancel>
-							<AlertDialogAction
-								onClick={handleConfirmDelete}
-								disabled={isDeleting}
-								variant="destructive"
-							>
-								{isDeleting && <Spinner />}
-								Delete
-							</AlertDialogAction>
-						</AlertDialogFooter>
-					</AlertDialogContent>
-				</AlertDialog>
+				<DeleteConnectionDialog
+					connection={deletingConnection}
+					dockerState={
+						deletingConnection
+							? dockerStates[deletingConnection.uuid]
+							: undefined
+					}
+					deleteDockerData={deleteDockerData}
+					deleting={isDeleting}
+					onDeleteDockerDataChange={setDeleteDockerData}
+					onCancel={handleCancelDelete}
+					onConfirm={handleConfirmDelete}
+				/>
 			</main>
 		</div>
 	);

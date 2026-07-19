@@ -1,6 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { FilterColumnKind, FilterExpression } from "@/lib/resultFilters";
 import { isSqlFunction } from "@/lib/sqlFunctions";
+import type {
+	DeleteConnectionResult,
+	DockerConnectionDraft,
+	DockerConnectionState,
+	DockerContainerSummary,
+	DockerDatabaseEngine,
+} from "@/types/docker";
+
+export { DOCKER_DATABASE_ENGINES } from "@/types/docker";
+export type {
+	DeleteConnectionResult,
+	DockerConnectionDraft,
+	DockerConnectionState,
+	DockerContainerSummary,
+	DockerDatabaseEngine,
+} from "@/types/docker";
 
 export interface Connection {
 	id: number;
@@ -243,13 +259,45 @@ export const api = {
 		update: (id: number, data: ConnectionFormData) =>
 			invoke<Connection>("update_connection", { id, data }),
 
-		delete: (id: number) => invoke<boolean>("delete_connection", { id }),
+		delete: (id: number, deleteDockerData = false) =>
+			invoke<DeleteConnectionResult>("delete_connection", {
+				id,
+				deleteDockerData,
+			}),
 
 		exportOne: (id: number) =>
 			invoke<ConnectionsExport>("export_connection", { id }),
 
 		importConnections: (data: ConnectionsExport) =>
 			invoke<number>("import_connections", { data }),
+	},
+
+	docker: {
+		listContainers: () =>
+			invoke<DockerContainerSummary[]>("docker_list_containers"),
+		prepareConnection: (containerId: string) =>
+			invoke<DockerConnectionDraft>("docker_prepare_connection", {
+				containerId,
+			}),
+		createDatabase: (engine: DockerDatabaseEngine, name: string) =>
+			invoke<Connection>("docker_create_database", {
+				request: { engine, name },
+			}),
+		linkConnection: (request: {
+			name: string;
+			container_id: string;
+			engine: DockerDatabaseEngine;
+			host: string;
+			port: number;
+			database: string;
+			username: string;
+			password: string;
+		}) => invoke<Connection>("docker_link_connection", { request }),
+		states: () => invoke<DockerConnectionState[]>("docker_connection_states"),
+		control: (uuid: string, action: "start" | "stop" | "restart") =>
+			invoke<void>("docker_control_connection", { uuid, action }),
+		connectionString: (uuid: string) =>
+			invoke<string>("docker_get_connection_string", { uuid }),
 	},
 
 	postgres: {
